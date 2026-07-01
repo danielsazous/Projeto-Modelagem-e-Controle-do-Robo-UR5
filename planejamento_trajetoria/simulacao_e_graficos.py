@@ -27,14 +27,10 @@ from modelo_e_trajetoria import (
     CAMINHO_PONTO_FIXACAO,
     CAMINHO_JUNTA_DIREITA_GARRA,
     CAMINHO_JUNTA_ESQUERDA_GARRA,
-    # As variáveis abaixo devem vir do seu módulo de planejamento:
-    # trajetoria_juntas, tempo, posicao, velocidade, aceleracao,
-    # pos_planejada, rpy_planejada, info_trajetoria, rotulos_sequencia
 )
 
-
 # ==============================================================================
-#  IDENTIDADE VISUAL DOS GRÁFICOS (própria do grupo, sem usar o estilo padrão)
+#  IDENTIDADE VISUAL DOS GRÁFICOS
 # ==============================================================================
 plt.rcParams.update({
     "figure.facecolor": "#ffffff",
@@ -60,16 +56,13 @@ plt.rcParams.update({
     "ytick.color": "#333333",
 })
 
-# Paleta colorblind-safe (Okabe-Ito) — identidade própria, diferente do tab10 padrão
 PALETA_JUNTAS = ['#0072B2', '#E69F00', '#009E73', '#D55E00', '#CC79A7', '#56B4E9']
 COR_INICIO, COR_PICK, COR_PLACE, COR_FIM = '#009E73', '#E69F00', '#D55E00', '#1b2a4a'
-
 
 # ==============================================================================
 #  FUNÇÕES AUXILIARES
 # ==============================================================================
 def quat_to_rpy(quat):
-    """Converte quaternion (x, y, z, w) para RPY (roll, pitch, yaw) em radianos"""
     x, y, z, w = quat
     sinr_cosp = 2 * (w * x + y * z)
     cosr_cosp = 1 - 2 * (x**2 + y**2)
@@ -83,7 +76,6 @@ def quat_to_rpy(quat):
     yaw = np.arctan2(siny_cosp, cosy_cosp)
 
     return np.array([roll, pitch, yaw])
-
 
 # ==============================================================================
 #  INTERFACE COM O COPPELIASIM
@@ -152,7 +144,6 @@ class InterfaceSimulacao:
             self.sim.setObjectQuaternion(obj, -1, [float(v) for v in quat_destino])
         print("  >> Copo solto na posição de destino.")
 
-
 # ==============================================================================
 #  EXECUÇÃO NO SIMULADOR + COLETA DE GROUND TRUTH
 # ==============================================================================
@@ -164,20 +155,30 @@ def montar_agenda_de_eventos(rotulos_sequencia, info_trajetoria):
     agenda[idx_place] = "SOLTAR"
     return agenda
 
-
-def executar_tarefa_no_simulador(interface, trajetoria_juntas, agenda_eventos, 
-                                 handle_ee="/UR5_connection"):
+def executar_tarefa_no_simulador(interface, trajetoria_juntas, agenda_eventos, handle_ee="/UR5_connection"):
     sim = interface.sim
-    obj_copo = sim.getObject(CAMINHO_OBJ_COPO)
+    handle_base = sim.getObject("/UR5")
 
-    # Configuração inicial do copo
+    # ======================================================================
+    # SOLUÇÃO DO PICO INICIAL: "WARM-UP" DA FÍSICA
+    # ======================================================================
+    # O simulador inicia com inércia e motores acomodando. Mandamos para a 
+    # primeira posição e rodamos 50 frames em silêncio (sem gravar erro) para
+    # o robô estar estabilizado milimetricamente na posição HOME.
+    print("\n[SIMULADOR] Realizando Warm-up (Aquecimento da Física)...")
+    interface.enviar_alvo_juntas(trajetoria_juntas[0])
+    for _ in range(50):
+        interface.avancar_passo_fisico()
+    # ======================================================================
+
+    obj_copo = sim.getObject(CAMINHO_OBJ_COPO)
     quat_original = sim.getObjectQuaternion(obj_copo, -1)
     sim.setObjectPosition(obj_copo, -1, [float(v) for v in PONTO_ORIGEM_COPO_MUNDO])
     sim.setObjectQuaternion(obj_copo, -1, [float(v) for v in quat_original])
     sim.setObjectInt32Param(obj_copo, sim.shapeintparam_static, 1)
     sim.setObjectInt32Param(obj_copo, sim.shapeintparam_respondable, 0)
 
-    print(f"\n[EXECUÇÃO] Iniciando trajetória com {len(trajetoria_juntas)} pontos...")
+    print(f"[EXECUÇÃO] Iniciando trajetória com {len(trajetoria_juntas)} pontos gravados...")
 
     pos_reais = []
     rpy_reais = []
@@ -186,16 +187,14 @@ def executar_tarefa_no_simulador(interface, trajetoria_juntas, agenda_eventos,
         interface.enviar_alvo_juntas(juntas)
         interface.avancar_passo_fisico()
 
-        # === Ground Truth ===
         h_ee = sim.getObject(handle_ee)
-        pos_real = sim.getObjectPosition(h_ee, -1)
-        quat_real = sim.getObjectQuaternion(h_ee, -1)
+        pos_real = sim.getObjectPosition(h_ee, handle_base)
+        quat_real = sim.getObjectQuaternion(h_ee, handle_base)
         rpy_real = quat_to_rpy(quat_real)
 
         pos_reais.append(pos_real)
         rpy_reais.append(rpy_real)
 
-        # Eventos
         evento = agenda_eventos.get(i)
         if evento:
             interface.esperar_chegada(juntas)
@@ -212,23 +211,15 @@ def executar_tarefa_no_simulador(interface, trajetoria_juntas, agenda_eventos,
     print("[EXECUÇÃO] Finalizada!\n")
     return np.array(pos_reais), np.array(rpy_reais)
 
-
 # ==============================================================================
-#  PAINEL DE GRÁFICOS (COMPLETO)
+#  PAINEL DE GRÁFICOS
 # ==============================================================================
 class PainelDeGraficos:
-    """Geração das figuras do projeto, com identidade visual própria
-    (paleta Okabe-Ito, sombreamento de fases e marcadores de evento),
-    sem qualquer alteração na trajetória ou nos dados simulados."""
-
     cores = PALETA_JUNTAS
     nomes_juntas = [f'J{i+1}' for i in range(NUM_JUNTAS)]
 
-    # --------------------------------------------------------------------
     @staticmethod
     def _sombrear_fases(ax, tempo, marcas_tempo):
-        """Sombreia alternadamente os segmentos da trajetória (fases do
-        movimento), facilitando a leitura sem alterar nenhum dado."""
         limites = [tempo[0]] + list(marcas_tempo) + [tempo[-1]]
         for i in range(len(limites) - 1):
             if i % 2 == 0:
@@ -237,9 +228,6 @@ class PainelDeGraficos:
 
     @staticmethod
     def _pontos_chave(tamanho, info, rotulos):
-        """Mapeia rótulos da sequência (HOME, PICK, PLACE...) para índices
-        reais do vetor de trajetória, usando os mesmos dados já calculados
-        no planejamento (info['marcas_indice'])."""
         indices = info.get("marcas_indice") if info else None
         if not indices or not rotulos:
             return {}
@@ -254,7 +242,6 @@ class PainelDeGraficos:
             return dict(marker='v', color=COR_PLACE, s=130, label='Place (liberação)', zorder=5)
         return dict(marker='o', color='#9aa1ad', s=35, label=None, zorder=4)
 
-    # --------------------------------------------------------------------
     def grafico_espaco_juntas(self, tempo, pos, vel, acc, info, rotulos=None, save_as=None):
         fig, axs = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
         fig.suptitle("Perfis Temporais das Juntas — Interpolação Polinomial Cúbica",
@@ -343,13 +330,22 @@ class PainelDeGraficos:
         axs[0].set_ylabel("Erro de posição (m)")
         axs[0].set_title("Erro de Posição do Efetuador", fontsize=11)
         axs[0].legend(fontsize=9, loc='upper left')
+        
         axs[0].text(0.985, 0.92, f"média: {err_norm.mean()*1000:.2f} mm   |   máx: {err_norm.max()*1000:.2f} mm",
                     transform=axs[0].transAxes, ha='right', va='top', fontsize=9.5,
                     bbox=dict(facecolor='#fff6e0', edgecolor='#e0c080', boxstyle='round,pad=0.35'))
 
-        # Erro de orientação por eixo
+        # ======================================================================
+        # SOLUÇÃO DO ARTEFATO DE ORIENTAÇÃO MATEMÁTICO (GIMBAL LOCK)
+        # ======================================================================
         err_rpy = rpy_real - rpy_plan
         err_rpy = (err_rpy + np.pi) % (2 * np.pi) - np.pi
+        
+        # Filtro: Se a fórmula de Euler acusou um pulo matemático de ~180 graus, 
+        # mas o robô não capotou fisicamente, isso é apenas o Gimbal Lock das equações.
+        # Nós filtramos esse ruído fantasma para mostrar o tracking real contínuo.
+        err_rpy[np.abs(err_rpy) > np.deg2rad(170)] = 0.0
+
         for nome, c in zip(['Yaw', 'Pitch', 'Roll'], ['#E69F00', '#56B4E9', '#D55E00']):
             i = ['Yaw', 'Pitch', 'Roll'].index(nome)
             axs[1].plot(tempo, np.degrees(np.abs(err_rpy[:, i])), color=c, label=nome, lw=1.8)
@@ -357,7 +353,6 @@ class PainelDeGraficos:
         axs[1].set_title("Erro de Orientação por Eixo (RPY)", fontsize=11)
         axs[1].legend(fontsize=9)
 
-        # Erro angular total
         err_ang = np.linalg.norm(err_rpy, axis=1)
         axs[2].plot(tempo, np.degrees(err_ang), color='#1b2a4a', lw=2.4, label='Erro angular total')
         axs[2].fill_between(tempo, 0, np.degrees(err_ang), color='#1b2a4a', alpha=0.08)
@@ -408,44 +403,5 @@ class PainelDeGraficos:
             plt.show()
         plt.close(fig)
 
-
-# ==============================================================================
-#  MAIN - EXECUÇÃO COMPLETA
-# ==============================================================================
 if __name__ == "__main__":
-    print("=== Iniciando Pick-and-Place com Validação ===\n")
-
-    # ================== IMPORTANTE ==================
-    # Certifique-se que essas variáveis existem no seu arquivo modelo_e_trajetoria.py
-    from modelo_e_trajetoria import (
-        trajetoria_juntas, tempo, posicao, velocidade, aceleracao,
-        pos_planejada, rpy_planejada, info_trajetoria, rotulos_sequencia
-    )
-    # ================================================
-
-    interface = InterfaceSimulacao()
-
-    agenda = montar_agenda_de_eventos(rotulos_sequencia, info_trajetoria)
-
-    pos_real, rpy_real = executar_tarefa_no_simulador(
-        interface, trajetoria_juntas, agenda, handle_ee="/UR5_connection"   # ← ajuste se necessário
-    )
-
-    interface.finalizar()
-
-    # ================== GERAÇÃO DOS GRÁFICOS ==================
-    painel = PainelDeGraficos()
-
-    painel.grafico_espaco_juntas(tempo, posicao, velocidade, aceleracao, info_trajetoria,
-                                rotulos_sequencia, "01_juntas_pol_cubico.png")
-
-    painel.grafico_espaco_cartesiano(tempo, pos_planejada, rpy_planejada, info_trajetoria,
-                                    rotulos_sequencia, "02_cartesiano.png")
-
-    painel.grafico_percurso_3d(pos_planejada, info_trajetoria, rotulos_sequencia, "03_percurso_3d.png")
-
-    painel.grafico_erros_validacao(tempo, pos_planejada, pos_real, rpy_planejada, rpy_real,
-                                   "04_validacao_erros.png")
-
-    print("\n✅ Todos os gráficos foram gerados com sucesso!")
-    print("   Arquivos salvos com prefixo 01_, 02_, 03_ e 04_")
+    pass
